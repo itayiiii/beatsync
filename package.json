@@ -1,0 +1,13 @@
+{
+  "name": "beatsync",
+  "version": "1.92.0",
+  "private": true,
+  "description": "beat.sync BPM controller",
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/core": "^6.2.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0"
+  }
+}
