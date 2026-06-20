@@ -20,4 +20,7 @@ repositories {
 
 dependencies {
     implementation project(':capacitor-android')
+    // capacitor-android keeps androidx.activity as 'implementation' (not exposed),
+    // so declare it explicitly for androidx.activity.result.ActivityResult.
+    implementation 'androidx.activity:activity:1.8.0'
 }
