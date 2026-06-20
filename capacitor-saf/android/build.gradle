@@ -1,0 +1,23 @@
+apply plugin: 'com.android.library'
+
+android {
+    namespace "com.itay.saf"
+    compileSdk 34
+    defaultConfig {
+        minSdkVersion 22
+        targetSdkVersion 34
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation project(':capacitor-android')
+}

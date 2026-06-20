@@ -1824,13 +1824,128 @@ function loadStorage(){
     }
   }catch(e){}
 }
-function saveStorage(){try{localStorage.setItem('bsync3',JSON.stringify(songs.map(s=>({name:s.name,folder:s.folder,bpm:s.bpm,bpmSource:s.bpmSource,verified:s.verified}))));}catch(e){}}
+function saveStorage(){try{localStorage.setItem('bsync3',JSON.stringify(songs.map(s=>({name:s.name,folder:s.folder,bpm:s.bpm,bpmSource:s.bpmSource,verified:s.verified,uri:s.uri||null,size:s.size||null}))));}catch(e){}}
+
+// ─── ANDROID SAF BRIDGE (Capacitor) ─────────────────────────────────────────
+// In the browser we use the File System Access API (window.showDirectoryPicker).
+// Inside the Android APK that API doesn't exist, so we talk to a tiny native
+// Capacitor plugin ("Saf") backed by the Storage Access Framework. A folder is
+// granted once (ACTION_OPEN_DOCUMENT_TREE + takePersistableUriPermission), the
+// grant survives restarts, and files are read in place by content:// URI.
+const IS_NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+const Saf = (function(){
+  const C = window.Capacitor;
+  if(!C) return null;
+  try{ if(C.registerPlugin) return C.registerPlugin('Saf'); }catch(e){}
+  if(C.Plugins && C.Plugins.Saf) return C.Plugins.Saf;
+  return null;
+})();
+
+// A song is playable if it has either a web handle or a SAF content URI.
+function hasSrc(s){ return !!(s && (s.file || s.uri)); }
+
+function base64ToBlob(b64, mime){
+  const bin = atob(b64 || '');
+  const len = bin.length;
+  const bytes = new Uint8Array(len);
+  for(let i=0;i<len;i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime || '' });
+}
+
+async function safReadBlob(uri, offset, length, mimeHint){
+  const args = (length != null) ? { uri, offset: offset||0, length } : { uri };
+  const res = await Saf.readFile(args);
+  return base64ToBlob(res.data, res.mime || mimeHint || '');
+}
+
+// Returns a Blob for a song's audio regardless of source (SAF URI or web handle).
+// Optional offset/length read just a window of the file (used for fast scanning).
+async function getFileBlob(song, offset, length){
+  if(song && song.uri && Saf){
+    return await safReadBlob(song.uri, offset||0, (length!=null?length:null), song.name);
+  }
+  if(song && song.file && song.file.getFile){
+    const f = await song.file.getFile();
+    if(length != null) return f.slice(offset||0, (offset||0)+length);
+    if(offset) return f.slice(offset);
+    return f;
+  }
+  throw new Error('no file source for '+(song && song.name));
+}
+
+// SAF-backed look-alikes of FileSystemDirectoryHandle / FileSystemFileHandle, so
+// the existing folder-navigation + folder-groups UI keeps working unchanged.
+class SafFileHandle{
+  constructor(name, uri, size){ this.kind='file'; this.name=name; this.uri=uri; this.size=size; }
+  async getFile(){ return await safReadBlob(this.uri, 0, null, this.name); }
+}
+class SafDirHandle{
+  constructor(name, uri){ this.kind='directory'; this.name=name; this.uri=uri; this._children=null; }
+  async _list(){
+    if(this._children) return this._children;
+    const res = await Saf.listChildren({ uri: this.uri });
+    const items = (res && res.items) || [];
+    this._children = items.map(it => it.isDirectory
+      ? new SafDirHandle(it.name, it.uri)
+      : new SafFileHandle(it.name, it.uri, it.size||0));
+    return this._children;
+  }
+  async *entries(){
+    const ch = await this._list();
+    for(const h of ch) yield [h.name, h];
+  }
+  async getDirectoryHandle(name){
+    const ch = await this._list();
+    const found = ch.find(h => h.kind==='directory' && h.name===name);
+    if(!found) throw Object.assign(new Error('NotFound: '+name), { name:'NotFoundError' });
+    return found;
+  }
+}
+
+// Remembered tree URIs (folder roots) — kept so locations survive between launches.
+function getSafTrees(){ try{ return JSON.parse(localStorage.getItem('bsync_saf_trees')||'[]'); }catch(e){ return []; } }
+function saveSafTrees(t){ try{ localStorage.setItem('bsync_saf_trees', JSON.stringify(t)); }catch(e){} }
+function rememberSafTree(uri, name){
+  const t = getSafTrees().filter(x => x.uri !== uri);
+  t.unshift({ uri, name: name||'', ts: Date.now() });
+  saveSafTrees(t);
+}
+
+// Native counterpart of selectFolder(): same flow, but over the SAF plugin.
+async function selectFolderNative(){
+  try{
+    const res = await Saf.pickFolder();          // { uri, name }
+    if(!res || !res.uri) return;
+    rememberSafTree(res.uri, res.name);
+    const dir = new SafDirHandle(res.name || 'Music', res.uri);
+    pendingDirHandle = dir;
+    pendingSubFolders = [];
+
+    const subFolders = [];
+    for await(const [name, fh] of dir.entries()){
+      if(fh.kind === 'directory') subFolders.push({ name, handle: fh });
+    }
+
+    if(subFolders.length === 0){
+      document.getElementById('folderLabel').textContent='📂 '+dir.name;
+      await walkDir(dir, dir.name, 0);
+      finishFolderSelect(dir.name);
+    } else {
+      showFolderDialog(dir.name, subFolders);
+    }
+  }catch(e){
+    const msg = (e && e.message) || '';
+    if(/cancel/i.test(msg)) return; // user backed out of the picker
+    showToast('שגיאה: '+msg);
+  }
+}
 
 // ─── FOLDER WALK ────────────────────────────────────────────────────────────
 let pendingDirHandle = null;
 let pendingSubFolders = [];
 
 async function selectFolder(){
+  if(IS_NATIVE && Saf){ return selectFolderNative(); }
   if(!window.showDirectoryPicker){showToast('נדרש Chrome עדכני');return;}
   try{
     const dir=await window.showDirectoryPicker({mode:'read'});
@@ -2250,9 +2365,10 @@ async function walkDir(h,folder,depth){
       const ex=songs.find(s=>s.name===name&&s.folder===folder);
       if(ex){
         ex.file=fh;
+        if(fh.uri){ ex.uri=fh.uri; if(fh.size) ex.size=fh.size; }
         if(!ex.bpm) ex.status='pending';
       }
-      else songs.push({name,folder,file:fh,bpm:null,bpmSource:null,status:'pending',verified:false});
+      else songs.push({name,folder,file:fh,uri:(fh.uri||null),size:(fh.size||null),bpm:null,bpmSource:null,status:'pending',verified:false});
       walkCount++;
       // Every 100 files: update UI + save + START SCANNING
       if(walkCount%100===0){
@@ -2314,14 +2430,24 @@ async function nextPhase1(){
   await Promise.all(batch.map(async song=>{
     try{
       let bpm=null;
-      // Step 1: ID3 metadata (instant, needs file)
-      if(song.file) bpm=await withTimeout(readBpmFromMetadata(song.file),500);
-      // Step 2: Fast audio analysis (1-2 sec, needs file)
-      if(!bpm&&song.file){
+      // Step 1: ID3 metadata (instant, reads only the first 128KB)
+      if(hasSrc(song)) bpm=await withTimeout(readBpmFromMetadata(song),500);
+      // Step 2: Fast audio analysis (1-2 sec)
+      if(!bpm&&hasSrc(song)){
         try{
-          const file=await song.file.getFile();
-          const ab=await file.arrayBuffer();
-          bpm=await withTimeout(audioBpm(ab),3000);
+          let ab, frac;
+          if(song.uri && song.size && song.size>600000){
+            // Native (SAF): read only a ~460KB window at 20% instead of the whole file
+            const skip=Math.floor(song.size*0.2);
+            const blob=await getFileBlob(song, skip, 460*1024);
+            ab=await blob.arrayBuffer();
+            frac=0; // already positioned at the analysis window
+          } else {
+            const blob=await getFileBlob(song);
+            ab=await blob.arrayBuffer();
+            frac=undefined; // audioBpm() defaults to 0.2
+          }
+          bpm=await withTimeout(audioBpm(ab, frac),3000);
           if(bpm){song.bpmSource='audio';diagAudioOk++;}
           else diagAudioFail++;
         }catch(e){diagAudioFail++;}
@@ -2366,11 +2492,10 @@ function parseFn(name, folder){
 }
 
 // ─── READ BPM FROM ID3 METADATA ────────────────────────────────────────────
-async function readBpmFromMetadata(fileHandle){
+async function readBpmFromMetadata(song){
   try{
-    const file=await fileHandle.getFile();
-    // Read first 128KB — enough for ID3 header
-    const slice=file.slice(0,131072);
+    // Read first 128KB — enough for the ID3 header (web slices lazily; SAF reads a range)
+    const slice=await getFileBlob(song, 0, 131072);
     const ab=await slice.arrayBuffer();
     const bytes=new Uint8Array(ab);
 
@@ -2402,13 +2527,13 @@ async function readBpmFromMetadata(fileHandle){
 }
 async function verifyCurrentSong(){
   const song=songs[currentIdx];
-  if(!song||!song.file||song.verified)return;
+  if(!song||!hasSrc(song)||song.verified)return;
   const verIdx=currentIdx;
   verifyingIdx=currentIdx;
   document.getElementById('npSrc').textContent='⟳ מאמת BPM (3 סגמנטים)...';
   document.getElementById('npSrc').className='npsrc vfy';
   try{
-    const file=await song.file.getFile();
+    const file=await getFileBlob(song);
     const ab=await file.arrayBuffer();
 
     // Sample the SAME fast algorithm at 3 different positions in the file.
@@ -2517,11 +2642,11 @@ async function audioBpm(ab, startFrac){
 async function playSong(idx){
   if(idx<0||idx>=songs.length)return;
   const song=songs[idx];
-  if(!song.file){showToast('בחר תיקייה מחדש');return;}
+  if(!hasSrc(song)){showToast('בחר תיקייה מחדש');return;}
   clearCountdown();
   currentIdx=idx;
   try{
-    const file=await song.file.getFile();
+    const file=await getFileBlob(song);
     audioEl.src=URL.createObjectURL(file);
     audioEl.play();
     isPlaying=true;
@@ -2557,7 +2682,7 @@ function skipSong(dir){
     // "BPM דומה" mode — pick random song within ±tolerance BPM (both ⏮ and ⏭)
     const curBpm=songs[currentIdx]?.bpm||activeBpm;
     if(curBpm){
-      const pool=songs.filter((s,i)=>s.bpm&&Math.abs(s.bpm-curBpm)<=tolerance&&i!==currentIdx&&s.file);
+      const pool=songs.filter((s,i)=>s.bpm&&Math.abs(s.bpm-curBpm)<=tolerance&&i!==currentIdx&&hasSrc(s));
       if(pool.length){
         const pick=pool[Math.floor(Math.random()*pool.length)];
         playSong(songs.indexOf(pick));
@@ -2600,7 +2725,7 @@ function onBpmChanged(bpm){
 
 function autoSelect(bpm){
   if(!bpm)return;
-  const pool=songs.filter((s,i)=>s.bpm&&Math.abs(s.bpm-bpm)<=tolerance&&i!==currentIdx&&s.file);
+  const pool=songs.filter((s,i)=>s.bpm&&Math.abs(s.bpm-bpm)<=tolerance&&i!==currentIdx&&hasSrc(s));
   if(!pool.length){showToast('אין שיר מתאים ל-'+bpm+' BPM');return;}
   const pick=pool[Math.floor(Math.random()*pool.length)];
   playSong(songs.indexOf(pick));
@@ -2743,7 +2868,7 @@ function updateDebug(){
   const pending=songs.filter(s=>!s.bpm&&s.status!=='scanning').length;
   const scanning=songs.filter(s=>s.status==='scanning').length;
   const done=songs.filter(s=>s.status==='done').length;
-  const noFile=songs.filter(s=>!s.file).length;
+  const noFile=songs.filter(s=>!hasSrc(s)).length;
   const info=[
     'v1.92 | '+new Date().toLocaleTimeString(),
     '─────────────────',

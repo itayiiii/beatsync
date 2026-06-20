@@ -5,7 +5,8 @@
   "description": "beat.sync BPM controller",
   "dependencies": {
     "@capacitor/android": "^6.2.0",
-    "@capacitor/core": "^6.2.0"
+    "@capacitor/core": "^6.2.0",
+    "capacitor-saf": "file:./capacitor-saf"
   },
   "devDependencies": {
     "@capacitor/cli": "^6.2.0"

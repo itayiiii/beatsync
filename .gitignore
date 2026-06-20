@@ -1,0 +1,7 @@
+# Capacitor generates the native project in CI (cap add android); keep it out of git.
+/android/
+node_modules/
+package-lock.json
+
+# Local tooling
+.DS_Store

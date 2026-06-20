@@ -1,0 +1,14 @@
+{
+  "name": "capacitor-saf",
+  "version": "1.0.0",
+  "description": "Tiny Capacitor plugin: pick a folder via the Storage Access Framework and read audio files in place by content:// URI.",
+  "private": true,
+  "capacitor": {
+    "android": {
+      "src": "android"
+    }
+  },
+  "peerDependencies": {
+    "@capacitor/core": "^6.0.0"
+  }
+}
